@@ -1,0 +1,41 @@
+name: Lint Shell Scripts
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect shell scripts
+        id: detect
+        run: |
+          set -euo pipefail
+          find . -type f \( -name "*.sh" -o -name "*.zsh" \) -not -path "./.git/*" > shell_files.txt
+          if [ -s shell_files.txt ]; then
+            echo "has_files=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_files=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install ShellCheck
+        if: steps.detect.outputs.has_files == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck
+        if: steps.detect.outputs.has_files == 'true'
+        run: |
+          xargs -r shellcheck < shell_files.txt
+
+      - name: Skip when no shell files exist
+        if: steps.detect.outputs.has_files == 'false'
+        run: echo "No .sh or .zsh files found; skipping ShellCheck."
