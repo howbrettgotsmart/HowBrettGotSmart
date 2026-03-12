@@ -168,8 +168,17 @@ load_launchdaemon() {
   log "Loading LaunchDaemon via launchctl."
   launchctl bootout "system/${DAEMON_LABEL}" >/dev/null 2>&1 || true
   launchctl bootout system "${LAUNCHD_PLIST}" >/dev/null 2>&1 || true
-  launchctl bootstrap system "${LAUNCHD_PLIST}"
-  launchctl enable "system/${DAEMON_LABEL}" || true
+
+  # Clear any persisted disabled state before bootstrap.
+  launchctl enable "system/${DAEMON_LABEL}" >/dev/null 2>&1 || true
+
+  if ! launchctl bootstrap system "${LAUNCHD_PLIST}"; then
+    log "ERROR: launchctl bootstrap failed for ${DAEMON_LABEL}"
+    log "Check disabled overrides with: sudo launchctl print-disabled system | grep ${DAEMON_LABEL}"
+    log "Check launchd logs with: log show --last 5m --predicate 'process == \"launchd\"' --style compact"
+    exit 1
+  fi
+
   launchctl print "system/${DAEMON_LABEL}" >/dev/null
 }
 
