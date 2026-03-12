@@ -1,0 +1,174 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# Script: update-chrome-if-newer.sh
+# Author: Brett Thomason
+# Created: 2026-03-11
+# Purpose: Check installed Google Chrome version on macOS against latest online
+#          stable version and install update only when newer is available.
+# -----------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT_NAME="$(basename "$0")"
+CHROME_APP="/Applications/Google Chrome.app"
+CHROME_PLIST="${CHROME_APP}/Contents/Info.plist"
+DEFAULT_PKG_URL="https://dl.google.com/chrome/mac/stable/accept_tos%3Dhttps%253A%252F%252Fwww.google.com%252Fintl%252Fen_ph%252Fchrome%252Fterms%252F%26_and_accept_tos%3Dhttps%253A%252F%252Fpolicies.google.com%252Fterms/googlechrome.pkg"
+VERSION_API_BASE="https://versionhistory.googleapis.com/v1/chrome/platforms"
+
+usage() {
+  cat <<EOF
+Usage:
+  sudo ${SCRIPT_NAME} [--pkg-url URL]
+
+Description:
+  1) Reads installed Chrome version from:
+     ${CHROME_PLIST}
+  2) Fetches latest stable Chrome version for macOS from Google's
+     VersionHistory API.
+  3) If online version is newer, downloads and installs the Chrome package.
+  4) If installed version is current/newer, exits without changes.
+EOF
+}
+
+log() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
+require_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    echo "ERROR: Run as root (use sudo)." >&2
+    exit 1
+  fi
+}
+
+parse_args() {
+  PKG_URL="${DEFAULT_PKG_URL}"
+
+  while (($# > 0)); do
+    case "$1" in
+      --pkg-url)
+        shift
+        if [[ $# -eq 0 ]]; then
+          echo "ERROR: Missing value for --pkg-url." >&2
+          exit 1
+        fi
+        PKG_URL="$1"
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "ERROR: Unknown argument: $1" >&2
+        usage >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
+
+version_gt() {
+  local v1="$1"
+  local v2="$2"
+  local IFS=.
+  local i max
+  local -a a b
+
+  read -r -a a <<< "$v1"
+  read -r -a b <<< "$v2"
+  max="${#a[@]}"
+  if (( ${#b[@]} > max )); then
+    max="${#b[@]}"
+  fi
+
+  for ((i=0; i<max; i++)); do
+    local ai="${a[i]:-0}"
+    local bi="${b[i]:-0}"
+    if ((10#${ai} > 10#${bi})); then
+      return 0
+    fi
+    if ((10#${ai} < 10#${bi})); then
+      return 1
+    fi
+  done
+
+  return 1
+}
+
+read_installed_version() {
+  if [[ ! -f "${CHROME_PLIST}" ]]; then
+    echo "0.0.0.0"
+    return
+  fi
+
+  /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${CHROME_PLIST}"
+}
+
+extract_version_from_json() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["versions"][0]["version"])'
+    return
+  fi
+
+  grep -Eo '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | cut -d'"' -f4
+}
+
+fetch_latest_version_for_platform() {
+  local platform="$1"
+  local url="${VERSION_API_BASE}/${platform}/channels/stable/versions?order_by=version%20desc&page_size=1"
+  local payload version
+
+  payload="$(curl -fsSL "${url}")"
+  version="$(printf '%s' "${payload}" | extract_version_from_json)"
+
+  if [[ -z "${version}" ]]; then
+    echo "ERROR: Unable to parse latest version for platform ${platform}." >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${version}"
+}
+
+main() {
+  local installed_version latest_mac latest_mac_arm64 latest_online
+  local tmp_pkg
+
+  require_root
+  parse_args "$@"
+
+  log "Checking installed Google Chrome version."
+  installed_version="$(read_installed_version)"
+  log "Installed version: ${installed_version}"
+
+  log "Fetching latest stable Chrome version from Google VersionHistory API."
+  latest_mac="$(fetch_latest_version_for_platform mac)"
+  latest_mac_arm64="$(fetch_latest_version_for_platform mac_arm64)"
+
+  if version_gt "${latest_mac}" "${latest_mac_arm64}"; then
+    latest_online="${latest_mac}"
+  else
+    latest_online="${latest_mac_arm64}"
+  fi
+
+  log "Latest online version: ${latest_online}"
+
+  if ! version_gt "${latest_online}" "${installed_version}"; then
+    log "No update needed. Installed Chrome is current (or newer)."
+    exit 0
+  fi
+
+  log "Newer version detected. Downloading Chrome package."
+  tmp_pkg="$(mktemp /tmp/googlechrome-update.XXXXXX.pkg)"
+  trap 'rm -f "${tmp_pkg}"' EXIT
+  curl -fL "${PKG_URL}" -o "${tmp_pkg}"
+
+  log "Installing Chrome package."
+  /usr/sbin/installer -pkg "${tmp_pkg}" -target /
+
+  log "Install complete. Current installed version:"
+  read_installed_version
+}
+
+main "$@"
