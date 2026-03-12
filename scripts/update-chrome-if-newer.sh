@@ -15,6 +15,7 @@ CHROME_APP="/Applications/Google Chrome.app"
 CHROME_PLIST="${CHROME_APP}/Contents/Info.plist"
 DEFAULT_PKG_URL="https://dl.google.com/chrome/mac/stable/accept_tos%3Dhttps%253A%252F%252Fwww.google.com%252Fintl%252Fen_ph%252Fchrome%252Fterms%252F%26_and_accept_tos%3Dhttps%253A%252F%252Fpolicies.google.com%252Fterms/googlechrome.pkg"
 VERSION_API_BASE="https://versionhistory.googleapis.com/v1/chrome/platforms"
+TMP_PKG=""
 
 usage() {
   cat <<EOF
@@ -33,6 +34,12 @@ EOF
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
+cleanup_temp_pkg() {
+  if [[ -n "${TMP_PKG}" && -f "${TMP_PKG}" ]]; then
+    rm -f "${TMP_PKG}"
+  fi
 }
 
 require_root() {
@@ -131,10 +138,39 @@ fetch_latest_version_for_platform() {
   printf '%s\n' "${version}"
 }
 
+quit_chrome_if_running() {
+  local waited=0
+
+  if ! pgrep -x "Google Chrome" >/dev/null 2>&1; then
+    log "Google Chrome is not running."
+    return
+  fi
+
+  log "Google Chrome is running. Attempting graceful quit."
+  osascript -e 'tell application "Google Chrome" to quit' >/dev/null 2>&1 || true
+
+  while pgrep -x "Google Chrome" >/dev/null 2>&1; do
+    if (( waited >= 15 )); then
+      log "Chrome still running after 15s. Forcing quit."
+      killall "Google Chrome" >/dev/null 2>&1 || true
+      sleep 2
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if pgrep -x "Google Chrome" >/dev/null 2>&1; then
+    log "Chrome did not fully stop; update may fail if app remains active."
+  else
+    log "Google Chrome closed."
+  fi
+}
+
 main() {
   local installed_version latest_mac latest_mac_arm64 latest_online
-  local tmp_pkg
 
+  trap cleanup_temp_pkg EXIT
   require_root
   parse_args "$@"
 
@@ -159,13 +195,14 @@ main() {
     exit 0
   fi
 
+  quit_chrome_if_running
+
   log "Newer version detected. Downloading Chrome package."
-  tmp_pkg="$(mktemp /tmp/googlechrome-update.XXXXXX.pkg)"
-  trap 'rm -f "${tmp_pkg}"' EXIT
-  curl -fL "${PKG_URL}" -o "${tmp_pkg}"
+  TMP_PKG="$(mktemp /tmp/googlechrome-update.XXXXXX.pkg)"
+  curl -fL "${PKG_URL}" -o "${TMP_PKG}"
 
   log "Installing Chrome package."
-  /usr/sbin/installer -pkg "${tmp_pkg}" -target /
+  /usr/sbin/installer -pkg "${TMP_PKG}" -target /
 
   log "Install complete. Current installed version:"
   read_installed_version
